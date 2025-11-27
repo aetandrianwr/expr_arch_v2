@@ -15,12 +15,12 @@ class RecurrentTransformer(nn.Module):
                  num_weekdays=7,
                  num_start_min_bins=1440,
                  num_diff_bins=100,
-                 embed_dim=96,
-                 num_heads=4,
-                 num_layers=2,
+                 embed_dim=128,
+                 num_heads=8,
+                 num_layers=3,
                  num_cycles=2,
                  num_refinements=8,
-                 dropout=0.15):
+                 dropout=0.2):
         super().__init__()
         
         self.embed_dim = embed_dim

@@ -102,15 +102,15 @@ def evaluate(model, data_loader, device):
 def train_model(
     num_epochs=150,
     batch_size=128,
-    learning_rate=0.001,
-    embed_dim=88,
+    learning_rate=0.0015,
+    embed_dim=96,
     num_heads=4,
     num_layers=2,
     num_cycles=2,
     num_refinements=8,
-    dropout=0.1,
+    dropout=0.15,
     max_len=50,
-    patience=20,
+    patience=25,
     device='cuda'
 ):
     set_seed(42)
@@ -226,14 +226,14 @@ if __name__ == "__main__":
     test_perf = train_model(
         num_epochs=150,
         batch_size=128,
-        learning_rate=0.001,
-        embed_dim=88,
+        learning_rate=0.0015,
+        embed_dim=96,
         num_heads=4,
         num_layers=2,
         num_cycles=2,
         num_refinements=8,
-        dropout=0.1,
+        dropout=0.15,
         max_len=50,
-        patience=20,
+        patience=25,
         device=device
     )
