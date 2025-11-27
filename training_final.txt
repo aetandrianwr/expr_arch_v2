@@ -19,4 +19,4 @@ Epoch 1/200
     return forward_call(*input, **kwargs)
   File "/content/expr_arch_v2/model.py", line 197, in forward
     final_logits = gate * copy_logits + (1 - gate) * gen_logits
-RuntimeError: The size of tensor a (80) must match the size of tensor b (1200) at non-singleton dimension 1
+RuntimeError: The size of tensor a (80) must match the size of tensor b (1200) at non-singleton dimension 2

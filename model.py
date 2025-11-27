@@ -75,7 +75,7 @@ class RecurrentTransformer(nn.Module):
         
         # Combine copy + generate
         self.combine_gate = nn.Sequential(
-            nn.Linear(embed_dim * 2, embed_dim),
+            nn.Linear(embed_dim * 2, 1),
             nn.Sigmoid()
         )
         
@@ -191,7 +191,7 @@ class RecurrentTransformer(nn.Module):
         gen_logits = self.generate_head(combined + trans_feat)
         
         # COMBINE: Gate between copy and generate
-        gate = self.combine_gate(torch.cat([combined, trans_feat], dim=-1)).unsqueeze(1)  # [B, 1]
+        gate = self.combine_gate(torch.cat([combined, trans_feat], dim=-1))  # [B, 1]
         
         # Final logits
         final_logits = gate * copy_logits + (1 - gate) * gen_logits
