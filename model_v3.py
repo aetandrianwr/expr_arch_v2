@@ -14,11 +14,11 @@ class RecurrentTransformer(nn.Module):
                  num_weekdays=7,
                  num_start_min_bins=1440,
                  num_diff_bins=100,
-                 embed_dim=88,
-                 num_heads=4,
-                 num_layers=2,
-                 num_cycles=2,
-                 num_refinements=8,
+                 embed_dim=160,
+                 num_heads=8,
+                 num_layers=4,
+                 num_cycles=3,
+                 num_refinements=12,
                  dropout=0.1):
         super().__init__()
         
