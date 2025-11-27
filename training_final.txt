@@ -1,7 +1,7 @@
 Using device: cuda
 Loading data...
 Creating model...
-Model parameters: 480,184
+Model parameters: 467,465
 
 Starting training...
 
@@ -13,10 +13,10 @@ Epoch 1/200
     test_perf = train_model(
   File "/content/expr_arch_v2/train.py", line 170, in train_model
     train_loss = train_epoch(model, train_loader, criterion, optimizer, device, scheduler)
-  File "/content/expr_arch_v2/train.py", line 43, in train_epoch
-    logits = model(loc, user, weekday, start_min, duration, diff, mask)
-  File "/usr/local/lib/python3.9/dist-packages/torch/nn/modules/module.py", line 1130, in _call_impl
-    return forward_call(*input, **kwargs)
-  File "/content/expr_arch_v2/model.py", line 197, in forward
-    final_logits = gate * copy_logits + (1 - gate) * gen_logits
-RuntimeError: The size of tensor a (80) must match the size of tensor b (1200) at non-singleton dimension 2
+  File "/content/expr_arch_v2/train.py", line 46, in train_epoch
+    loss.backward()
+  File "/usr/local/lib/python3.9/dist-packages/torch/_tensor.py", line 396, in backward
+    torch.autograd.backward(self, gradient, retain_graph, create_graph, inputs=inputs)
+  File "/usr/local/lib/python3.9/dist-packages/torch/autograd/__init__.py", line 173, in backward
+    Variable._execution_engine.run_backward(  # Calls into the C++ engine to run the backward pass
+RuntimeError: one of the variables needed for gradient computation has been modified by an inplace operation: [torch.cuda.FloatTensor []], which is output 0 of AsStridedBackward0, is at version 2364; expected version 2363 instead. Hint: enable anomaly detection to find the operation that failed to compute its gradient, with torch.autograd.set_detect_anomaly(True).

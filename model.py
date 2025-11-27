@@ -163,24 +163,19 @@ class RecurrentTransformer(nn.Module):
             refined = self.refine_mlp(combined.detach())
             combined = combined + 0.1 * refined
         
-        # COPY MECHANISM: Calculate attention over input sequence
+        # COPY MECHANISM: Simpler approach - just use softmax over sequence and map to vocabulary
         query = self.copy_query(combined).unsqueeze(1)  # [B, 1, D]
         keys = self.copy_key(h)  # [B, L, D]
         
-        # Copy scores over input locations
-        copy_scores = torch.bmm(query, keys.transpose(1, 2)).squeeze(1) / math.sqrt(self.embed_dim)  # [B, L]
-        copy_scores = copy_scores.masked_fill(~mask, -1e9)
+        # Attention scores over sequence positions
+        copy_attn = torch.bmm(query, keys.transpose(1, 2)).squeeze(1)  # [B, L]
+        copy_attn = copy_attn / math.sqrt(self.embed_dim)
+        copy_attn = copy_attn.masked_fill(~mask, -1e9)
+        copy_attn = F.softmax(copy_attn, dim=-1)  # [B, L]
         
-        # Convert to location-level scores
-        copy_logits = torch.zeros(B, 1200, device=loc.device)
-        for b in range(B):
-            for i in range(L):
-                if mask[b, i]:
-                    loc_id = loc[b, i].item()
-                    copy_logits[b, loc_id] = torch.max(
-                        copy_logits[b, loc_id],
-                        copy_scores[b, i]
-                    )
+        # Map sequence positions to vocabulary (simple averaging for same locations)
+        copy_logits = torch.zeros(B, 1200, device=loc.device, dtype=copy_attn.dtype)
+        copy_logits.scatter_add_(1, loc, copy_attn)
         
         # TRANSITION: Last location -> target
         last_locs = loc[torch.arange(B), lengths.clamp(min=0)]
