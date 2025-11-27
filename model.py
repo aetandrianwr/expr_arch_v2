@@ -17,7 +17,7 @@ class RecurrentTransformer(nn.Module):
                  num_weekdays=7,
                  num_start_min_bins=1440,
                  num_diff_bins=100,
-                 embed_dim=64,
+                 embed_dim=96,
                  num_heads=4,
                  num_layers=2,
                  num_cycles=2,
@@ -33,8 +33,10 @@ class RecurrentTransformer(nn.Module):
         self.loc_embed = nn.Embedding(num_locations, embed_dim, padding_idx=0)
         self.user_embed = nn.Embedding(num_users, embed_dim, padding_idx=0)
         
-        # USER-LOCATION INTERACTION (critical for 50%!)
-        self.user_loc_interaction = nn.Bilinear(embed_dim, embed_dim, embed_dim)
+        # USER-LOCATION INTERACTION (simpler)
+        self.user_proj = nn.Linear(embed_dim, embed_dim // 2)
+        self.loc_proj = nn.Linear(embed_dim, embed_dim // 2)
+        self.interaction_combine = nn.Linear(embed_dim, embed_dim)
         
         # Context (lighter)
         self.weekday_embed = nn.Embedding(num_weekdays, 16, padding_idx=0)
@@ -100,7 +102,9 @@ class RecurrentTransformer(nn.Module):
         
         # USER-LOCATION INTERACTION
         user_expanded = user_emb.unsqueeze(1).expand(-1, L, -1)  # [B, L, D]
-        interaction = self.user_loc_interaction(user_expanded, loc_emb)  # [B, L, D]
+        user_proj = self.user_proj(user_expanded)
+        loc_proj = self.loc_proj(loc_emb)
+        interaction = self.interaction_combine(torch.cat([user_proj, loc_proj], dim=-1))  # [B, L, D]
         
         # Enhanced location representation
         x = loc_emb + interaction
@@ -140,9 +144,10 @@ class RecurrentTransformer(nn.Module):
         all_loc_expanded = all_loc_emb.unsqueeze(0).expand(B, -1, -1)  # [B, num_locs, D]
         
         # User-location interaction for all locations
-        all_interactions = self.user_loc_interaction(
-            user_for_all.expand(-1, 1200, -1),
-            all_loc_expanded
+        user_proj_all = self.user_proj(user_for_all.expand(-1, 1200, -1))
+        loc_proj_all = self.loc_proj(all_loc_expanded)
+        all_interactions = self.interaction_combine(
+            torch.cat([user_proj_all, loc_proj_all], dim=-1)
         )  # [B, num_locs, D]
         
         # Score via dot product

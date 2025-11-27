@@ -103,7 +103,7 @@ def train_model(
     num_epochs=250,
     batch_size=64,
     learning_rate=0.003,
-    embed_dim=64,
+    embed_dim=96,
     num_heads=4,
     num_layers=2,
     num_cycles=2,
