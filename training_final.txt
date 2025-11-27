@@ -1,0 +1,22 @@
+Using device: cuda
+Loading data...
+Creating model...
+Model parameters: 480,184
+
+Starting training...
+
+Epoch 1/200
+Training:   0%|          | 0/58 [00:00<?, ?it/s]/content/expr_arch_v2/model.py:119: UserWarning: __floordiv__ is deprecated, and its behavior will change in a future version of pytorch. It currently rounds toward 0 (like the 'trunc' function NOT 'floor'). This results in incorrect rounding for negative values. To keep the current behavior, use torch.div(a, b, rounding_mode='trunc'), or for actual floor division, use torch.div(a, b, rounding_mode='floor').
+  self.time_embed((start_min // 30).clamp(0, 47)),
+                                                Traceback (most recent call last):
+  File "/content/expr_arch_v2/train.py", line 226, in <module>
+    test_perf = train_model(
+  File "/content/expr_arch_v2/train.py", line 170, in train_model
+    train_loss = train_epoch(model, train_loader, criterion, optimizer, device, scheduler)
+  File "/content/expr_arch_v2/train.py", line 43, in train_epoch
+    logits = model(loc, user, weekday, start_min, duration, diff, mask)
+  File "/usr/local/lib/python3.9/dist-packages/torch/nn/modules/module.py", line 1130, in _call_impl
+    return forward_call(*input, **kwargs)
+  File "/content/expr_arch_v2/model.py", line 197, in forward
+    final_logits = gate * copy_logits + (1 - gate) * gen_logits
+RuntimeError: The size of tensor a (80) must match the size of tensor b (1200) at non-singleton dimension 1

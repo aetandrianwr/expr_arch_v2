@@ -191,7 +191,7 @@ class RecurrentTransformer(nn.Module):
         gen_logits = self.generate_head(combined + trans_feat)
         
         # COMBINE: Gate between copy and generate
-        gate = self.combine_gate(torch.cat([combined, trans_feat], dim=-1))
+        gate = self.combine_gate(torch.cat([combined, trans_feat], dim=-1)).unsqueeze(1)  # [B, 1]
         
         # Final logits
         final_logits = gate * copy_logits + (1 - gate) * gen_logits
