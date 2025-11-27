@@ -100,17 +100,17 @@ def evaluate(model, data_loader, device):
 
 
 def train_model(
-    num_epochs=200,
-    batch_size=128,
-    learning_rate=0.002,
-    embed_dim=80,
+    num_epochs=250,
+    batch_size=64,
+    learning_rate=0.003,
+    embed_dim=64,
     num_heads=4,
     num_layers=2,
     num_cycles=2,
     num_refinements=8,
-    dropout=0.1,
+    dropout=0.3,
     max_len=50,
-    patience=35,
+    patience=40,
     device='cuda'
 ):
     set_seed(42)

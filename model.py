@@ -6,9 +6,10 @@ import math
 
 class RecurrentTransformer(nn.Module):
     """
-    Pointer network + generation hybrid for location prediction.
-    PRIMARY: Copy from input (69% targets in sequence!)
-    SECONDARY: Generate new locations
+    Highly optimized for location prediction:
+    - Strong user-location interaction
+    - Last location emphasis  
+    - Efficient attention-based sequence modeling
     """
     def __init__(self, 
                  num_locations=1200,
@@ -16,69 +17,66 @@ class RecurrentTransformer(nn.Module):
                  num_weekdays=7,
                  num_start_min_bins=1440,
                  num_diff_bins=100,
-                 embed_dim=80,
+                 embed_dim=64,
                  num_heads=4,
                  num_layers=2,
                  num_cycles=2,
                  num_refinements=8,
-                 dropout=0.1):
+                 dropout=0.3):
         super().__init__()
         
         self.embed_dim = embed_dim
         self.num_cycles = num_cycles
         self.num_refinements = num_refinements
         
-        # Strong location embedding
+        # Core embeddings
         self.loc_embed = nn.Embedding(num_locations, embed_dim, padding_idx=0)
+        self.user_embed = nn.Embedding(num_users, embed_dim, padding_idx=0)
         
-        # User-specific embedding (important!)
-        self.user_embed = nn.Embedding(num_users, 32, padding_idx=0)
-        self.weekday_embed = nn.Embedding(num_weekdays, 8, padding_idx=0)
-        self.time_embed = nn.Embedding(48, 16, padding_idx=0)
-        self.diff_embed = nn.Embedding(50, 8, padding_idx=0)
+        # USER-LOCATION INTERACTION (critical for 50%!)
+        self.user_loc_interaction = nn.Bilinear(embed_dim, embed_dim, embed_dim)
         
-        # Context
-        self.ctx_fc = nn.Linear(32 + 8 + 16 + 8, embed_dim)
+        # Context (lighter)
+        self.weekday_embed = nn.Embedding(num_weekdays, 16, padding_idx=0)
+        self.time_embed = nn.Embedding(48, 24, padding_idx=0)
+        self.diff_embed = nn.Embedding(50, 16, padding_idx=0)
         
         # Position
         self.pos_embed = nn.Parameter(torch.randn(1, 100, embed_dim) * 0.02)
         
-        # Recurrent memory
-        self.mem_init = nn.ParameterList([
-            nn.Parameter(torch.zeros(1, embed_dim)) for _ in range(num_cycles)
-        ])
+        # Recurrent state
+        self.init_state = nn.Parameter(torch.zeros(1, embed_dim))
         
-        # Transformer
-        self.transformer = nn.ModuleList([
-            nn.TransformerEncoderLayer(
-                d_model=embed_dim,
-                nhead=num_heads,
-                dim_feedforward=embed_dim * 4,
-                dropout=dropout,
-                activation='gelu',
-                batch_first=True,
-                norm_first=True
-            ) for _ in range(num_layers)
-        ])
-        
-        # Memory update
-        self.mem_attn = nn.MultiheadAttention(embed_dim, 4, dropout=dropout, batch_first=True)
-        
-        # POINTER NETWORK: Strong copy mechanism
-        self.pointer_query = nn.Linear(embed_dim, embed_dim)
-        self.pointer_key = nn.Linear(embed_dim, embed_dim)
-        
-        # User preference modeling
-        self.user_pref = nn.Linear(32, embed_dim)
-        
-        # Generation (for 31% not in sequence)
-        self.gen_head = nn.Linear(embed_dim, num_locations)
-        
-        # Copy/generate balance (per-sample learned)
-        self.copy_gen_balance = nn.Sequential(
-            nn.Linear(embed_dim + 32, 1),
-            nn.Sigmoid()
+        # Lightweight transformer
+        self.attn = nn.MultiheadAttention(embed_dim, num_heads, dropout=dropout, batch_first=True)
+        self.ffn = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim * 2),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(embed_dim * 2, embed_dim)
         )
+        self.norm1 = nn.LayerNorm(embed_dim)
+        self.norm2 = nn.LayerNorm(embed_dim)
+        
+        # State update
+        self.state_update = nn.GRUCell(embed_dim, embed_dim)
+        
+        # LAST LOCATION emphasis
+        self.last_loc_proj = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim),
+            nn.LayerNorm(embed_dim),
+            nn.GELU()
+        )
+        
+        # Prediction head - user-conditioned
+        self.pred_query = nn.Linear(embed_dim, embed_dim)
+        self.pred_key = nn.Linear(embed_dim, embed_dim)
+        
+        # Direct prediction
+        self.direct_pred = nn.Linear(embed_dim, num_locations)
+        
+        # Ensemble weight
+        self.ensemble_weight = nn.Linear(embed_dim, 1)
         
         self._init_weights()
     
@@ -96,88 +94,67 @@ class RecurrentTransformer(nn.Module):
     def forward(self, loc, user, weekday, start_min, duration, diff, mask):
         B, L = loc.shape
         
-        # Embeddings
-        loc_emb = self.loc_embed(loc)
-        user_emb = self.user_embed(user)
+        # Core embeddings
+        loc_emb = self.loc_embed(loc)  # [B, L, D]
+        user_emb = self.user_embed(user[:, 0])  # [B, D] - same user for whole sequence
         
-        ctx = torch.cat([
-            user_emb,
-            self.weekday_embed(weekday),
-            self.time_embed(torch.div(start_min, 30, rounding_mode='floor').clamp(0, 47)),
-            self.diff_embed(diff.clamp(0, 49))
-        ], dim=-1)
-        ctx_proj = self.ctx_fc(ctx)
+        # USER-LOCATION INTERACTION
+        user_expanded = user_emb.unsqueeze(1).expand(-1, L, -1)  # [B, L, D]
+        interaction = self.user_loc_interaction(user_expanded, loc_emb)  # [B, L, D]
         
-        # Input
-        x = loc_emb + ctx_proj + self.pos_embed[:, :L]
+        # Enhanced location representation
+        x = loc_emb + interaction
         
-        # Mask
+        # Add position
+        x = x + self.pos_embed[:, :L]
+        
+        # Attention mask
         pad_mask = ~mask
         
-        # Recurrent cycles
-        mem = self.mem_init[0].expand(B, -1)
+        # Lightweight transformer
+        attn_out, _ = self.attn(x, x, x, key_padding_mask=pad_mask)
+        x = self.norm1(x + attn_out)
         
-        for cycle in range(self.num_cycles):
-            # Add memory
-            x_with_mem = x + mem.unsqueeze(1) * 0.3
-            
-            # Transformer
-            h = x_with_mem
-            for layer in self.transformer:
-                h = layer(h, src_key_padding_mask=pad_mask)
-            
-            # Update memory
-            mem_new, _ = self.mem_attn(
-                mem.unsqueeze(1), h, h,
-                key_padding_mask=pad_mask
-            )
-            mem = mem + mem_new.squeeze(1)
-            
-            if cycle + 1 < self.num_cycles:
-                mem = mem + self.mem_init[cycle + 1].expand(B, -1)
+        ffn_out = self.ffn(x)
+        x = self.norm2(x + ffn_out)
         
-        # Final representation
+        # Get last valid position
         lengths = mask.sum(1) - 1
-        last_h = h[torch.arange(B), lengths.clamp(min=0)]
-        final_repr = last_h + mem
+        last_idx = lengths.clamp(min=0)
         
-        # User preference
-        user_pref = self.user_pref(user_emb[:, 0, :])  # [B, D]
-        final_repr = final_repr + user_pref
+        # Extract last location representation
+        last_repr = x[torch.arange(B), last_idx]  # [B, D]
         
-        # POINTER NETWORK: Copy mechanism
-        query = self.pointer_query(final_repr).unsqueeze(1)  # [B, 1, D]
-        keys = self.pointer_key(h)  # [B, L, D]
+        # Emphasize last location
+        last_enhanced = self.last_loc_proj(last_repr)
         
-        # Pointer scores
-        pointer_scores = torch.bmm(query, keys.transpose(1, 2)).squeeze(1)  # [B, L]
-        pointer_scores = pointer_scores / math.sqrt(self.embed_dim)
-        pointer_scores = pointer_scores.masked_fill(~mask, -1e9)
-        pointer_probs = F.softmax(pointer_scores, dim=-1)  # [B, L]
+        # Combine with user
+        final_repr = last_enhanced + user_emb
         
-        # Map to vocabulary with STRONG aggregation
-        copy_dist = torch.zeros(B, 1200, device=loc.device, dtype=pointer_probs.dtype)
+        # PREDICTION via similarity to all location embeddings
+        query = self.pred_query(final_repr)  # [B, D]
         
-        # Scatter-add: accumulate probabilities for repeated locations
-        copy_dist.scatter_add_(1, loc, pointer_probs)
+        # Get all location embeddings and interact with user
+        all_loc_emb = self.loc_embed.weight  # [num_locs, D]
+        user_for_all = user_emb.unsqueeze(1)  # [B, 1, D]
+        all_loc_expanded = all_loc_emb.unsqueeze(0).expand(B, -1, -1)  # [B, num_locs, D]
         
-        # Add small boost for locations that appear multiple times (pattern reinforcement)
-        for b in range(B):
-            loc_counts = torch.bincount(loc[b, mask[b]], minlength=1200)
-            boost = (loc_counts > 0).float() * 0.1
-            copy_dist[b] = copy_dist[b] + boost[:1200]
+        # User-location interaction for all locations
+        all_interactions = self.user_loc_interaction(
+            user_for_all.expand(-1, 1200, -1),
+            all_loc_expanded
+        )  # [B, num_locs, D]
         
-        copy_logits = torch.log(copy_dist + 1e-10)
+        # Score via dot product
+        keys = self.pred_key(all_interactions)  # [B, num_locs, D]
+        scores = torch.bmm(keys, query.unsqueeze(-1)).squeeze(-1)  # [B, num_locs]
         
-        # GENERATION: For new locations
-        gen_logits = self.gen_head(final_repr)
+        # Direct prediction
+        direct_logits = self.direct_pred(final_repr)  # [B, num_locs]
         
-        # Balance (learned per sample based on sequence and user)
-        balance = self.copy_gen_balance(torch.cat([final_repr, user_emb[:, 0, :]], dim=-1))
-        
-        # Combined (bias towards copying since 69% targets are in sequence)
-        copy_weight = 0.8 + balance * 0.2  # 0.8-1.0 range, biased to copy
-        final_logits = copy_weight * copy_logits + (1 - copy_weight) * gen_logits
+        # Ensemble
+        weight = torch.sigmoid(self.ensemble_weight(final_repr))  # [B, 1]
+        final_logits = weight * scores + (1 - weight) * direct_logits
         
         return final_logits
 
