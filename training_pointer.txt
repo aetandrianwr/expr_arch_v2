@@ -1,0 +1,28 @@
+Using device: cuda
+Loading data...
+Creating model...
+Model parameters: 406,697
+
+Starting training...
+
+Epoch 1/200
+Training:   0%|          | 0/58 [00:00<?, ?it/s]                                                Traceback (most recent call last):
+  File "/content/expr_arch_v2/train.py", line 226, in <module>
+    test_perf = train_model(
+  File "/content/expr_arch_v2/train.py", line 170, in train_model
+    train_loss = train_epoch(model, train_loader, criterion, optimizer, device, scheduler)
+  File "/content/expr_arch_v2/train.py", line 43, in train_epoch
+    logits = model(loc, user, weekday, start_min, duration, diff, mask)
+  File "/usr/local/lib/python3.9/dist-packages/torch/nn/modules/module.py", line 1130, in _call_impl
+    return forward_call(*input, **kwargs)
+  File "/content/expr_arch_v2/model.py", line 176, in forward
+    balance = self.copy_gen_balance(torch.cat([final_repr, user_pref], dim=-1))
+  File "/usr/local/lib/python3.9/dist-packages/torch/nn/modules/module.py", line 1130, in _call_impl
+    return forward_call(*input, **kwargs)
+  File "/usr/local/lib/python3.9/dist-packages/torch/nn/modules/container.py", line 139, in forward
+    input = module(input)
+  File "/usr/local/lib/python3.9/dist-packages/torch/nn/modules/module.py", line 1130, in _call_impl
+    return forward_call(*input, **kwargs)
+  File "/usr/local/lib/python3.9/dist-packages/torch/nn/modules/linear.py", line 114, in forward
+    return F.linear(input, self.weight, self.bias)
+RuntimeError: mat1 and mat2 shapes cannot be multiplied (128x160 and 112x1)

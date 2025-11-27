@@ -173,7 +173,7 @@ class RecurrentTransformer(nn.Module):
         gen_logits = self.gen_head(final_repr)
         
         # Balance (learned per sample based on sequence and user)
-        balance = self.copy_gen_balance(torch.cat([final_repr, user_pref], dim=-1))
+        balance = self.copy_gen_balance(torch.cat([final_repr, user_emb[:, 0, :]], dim=-1))
         
         # Combined (bias towards copying since 69% targets are in sequence)
         copy_weight = 0.8 + balance * 0.2  # 0.8-1.0 range, biased to copy
