@@ -6,8 +6,9 @@ import math
 
 class RecurrentTransformer(nn.Module):
     """
-    Optimized for GeoLife: Copy mechanism + Transition modeling + Recurrent Transformer
-    Key insight: 69% of targets are in the input sequence!
+    Pointer network + generation hybrid for location prediction.
+    PRIMARY: Copy from input (69% targets in sequence!)
+    SECONDARY: Generate new locations
     """
     def __init__(self, 
                  num_locations=1200,
@@ -19,7 +20,7 @@ class RecurrentTransformer(nn.Module):
                  num_heads=4,
                  num_layers=2,
                  num_cycles=2,
-                 num_refinements=12,
+                 num_refinements=8,
                  dropout=0.1):
         super().__init__()
         
@@ -27,20 +28,19 @@ class RecurrentTransformer(nn.Module):
         self.num_cycles = num_cycles
         self.num_refinements = num_refinements
         
-        # Location embedding (most important)
+        # Strong location embedding
         self.loc_embed = nn.Embedding(num_locations, embed_dim, padding_idx=0)
         
-        # Context embeddings (smaller)
-        self.user_embed = nn.Embedding(num_users, 24, padding_idx=0)
+        # User-specific embedding (important!)
+        self.user_embed = nn.Embedding(num_users, 32, padding_idx=0)
         self.weekday_embed = nn.Embedding(num_weekdays, 8, padding_idx=0)
-        self.time_embed = nn.Embedding(48, 16, padding_idx=0)  # 30min buckets
+        self.time_embed = nn.Embedding(48, 16, padding_idx=0)
         self.diff_embed = nn.Embedding(50, 8, padding_idx=0)
         
-        # Context fusion
-        ctx_dim = 24 + 8 + 16 + 8
-        self.ctx_proj = nn.Linear(ctx_dim, embed_dim)
+        # Context
+        self.ctx_fc = nn.Linear(32 + 8 + 16 + 8, embed_dim)
         
-        # Positional encoding
+        # Position
         self.pos_embed = nn.Parameter(torch.randn(1, 100, embed_dim) * 0.02)
         
         # Recurrent memory
@@ -60,37 +60,24 @@ class RecurrentTransformer(nn.Module):
                 norm_first=True
             ) for _ in range(num_layers)
         ])
-        self.norm = nn.LayerNorm(embed_dim)
         
-        # Memory attention
+        # Memory update
         self.mem_attn = nn.MultiheadAttention(embed_dim, 4, dropout=dropout, batch_first=True)
         
-        # CRITICAL: Copy mechanism - predict which input location is the target
-        self.copy_query = nn.Linear(embed_dim, embed_dim)
-        self.copy_key = nn.Linear(embed_dim, embed_dim)
+        # POINTER NETWORK: Strong copy mechanism
+        self.pointer_query = nn.Linear(embed_dim, embed_dim)
+        self.pointer_key = nn.Linear(embed_dim, embed_dim)
         
-        # Transition modeling: last_loc -> target
-        self.transition_embed = nn.Embedding(num_locations, embed_dim // 2, padding_idx=0)
-        self.transition_fc = nn.Linear(embed_dim // 2, embed_dim)
+        # User preference modeling
+        self.user_pref = nn.Linear(32, embed_dim)
         
-        # Combine copy + generate
-        self.combine_gate = nn.Sequential(
-            nn.Linear(embed_dim * 2, 1),
+        # Generation (for 31% not in sequence)
+        self.gen_head = nn.Linear(embed_dim, num_locations)
+        
+        # Copy/generate balance (per-sample learned)
+        self.copy_gen_balance = nn.Sequential(
+            nn.Linear(embed_dim + 32, 1),
             nn.Sigmoid()
-        )
-        
-        # Generation head
-        self.generate_head = nn.Sequential(
-            nn.Linear(embed_dim, embed_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(embed_dim, num_locations)
-        )
-        
-        # Refinement
-        self.refine_mlp = nn.Sequential(
-            nn.Linear(embed_dim, embed_dim),
-            nn.GELU()
         )
         
         self._init_weights()
@@ -110,35 +97,34 @@ class RecurrentTransformer(nn.Module):
         B, L = loc.shape
         
         # Embeddings
-        loc_emb = self.loc_embed(loc)  # [B, L, D]
+        loc_emb = self.loc_embed(loc)
+        user_emb = self.user_embed(user)
         
-        # Context
         ctx = torch.cat([
-            self.user_embed(user),
+            user_emb,
             self.weekday_embed(weekday),
-            self.time_embed((start_min // 30).clamp(0, 47)),
+            self.time_embed(torch.div(start_min, 30, rounding_mode='floor').clamp(0, 47)),
             self.diff_embed(diff.clamp(0, 49))
         ], dim=-1)
-        ctx = self.ctx_proj(ctx)
+        ctx_proj = self.ctx_fc(ctx)
         
-        # Combine
-        x = loc_emb + ctx + self.pos_embed[:, :L]
+        # Input
+        x = loc_emb + ctx_proj + self.pos_embed[:, :L]
         
-        # Padding mask
+        # Mask
         pad_mask = ~mask
         
         # Recurrent cycles
         mem = self.mem_init[0].expand(B, -1)
         
         for cycle in range(self.num_cycles):
-            # Add memory to sequence
-            x_with_mem = x + mem.unsqueeze(1) * 0.2
+            # Add memory
+            x_with_mem = x + mem.unsqueeze(1) * 0.3
             
             # Transformer
             h = x_with_mem
             for layer in self.transformer:
                 h = layer(h, src_key_padding_mask=pad_mask)
-            h = self.norm(h)
             
             # Update memory
             mem_new, _ = self.mem_attn(
@@ -150,46 +136,48 @@ class RecurrentTransformer(nn.Module):
             if cycle + 1 < self.num_cycles:
                 mem = mem + self.mem_init[cycle + 1].expand(B, -1)
         
-        # Get representation
-        # Use last valid position
+        # Final representation
         lengths = mask.sum(1) - 1
         last_h = h[torch.arange(B), lengths.clamp(min=0)]
+        final_repr = last_h + mem
         
-        # Combine with memory
-        combined = last_h + mem
+        # User preference
+        user_pref = self.user_pref(user_emb[:, 0, :])  # [B, D]
+        final_repr = final_repr + user_pref
         
-        # Refinement loop
-        for _ in range(self.num_refinements):
-            refined = self.refine_mlp(combined.detach())
-            combined = combined + 0.1 * refined
+        # POINTER NETWORK: Copy mechanism
+        query = self.pointer_query(final_repr).unsqueeze(1)  # [B, 1, D]
+        keys = self.pointer_key(h)  # [B, L, D]
         
-        # COPY MECHANISM: Simpler approach - just use softmax over sequence and map to vocabulary
-        query = self.copy_query(combined).unsqueeze(1)  # [B, 1, D]
-        keys = self.copy_key(h)  # [B, L, D]
+        # Pointer scores
+        pointer_scores = torch.bmm(query, keys.transpose(1, 2)).squeeze(1)  # [B, L]
+        pointer_scores = pointer_scores / math.sqrt(self.embed_dim)
+        pointer_scores = pointer_scores.masked_fill(~mask, -1e9)
+        pointer_probs = F.softmax(pointer_scores, dim=-1)  # [B, L]
         
-        # Attention scores over sequence positions
-        copy_attn = torch.bmm(query, keys.transpose(1, 2)).squeeze(1)  # [B, L]
-        copy_attn = copy_attn / math.sqrt(self.embed_dim)
-        copy_attn = copy_attn.masked_fill(~mask, -1e9)
-        copy_attn = F.softmax(copy_attn, dim=-1)  # [B, L]
+        # Map to vocabulary with STRONG aggregation
+        copy_dist = torch.zeros(B, 1200, device=loc.device, dtype=pointer_probs.dtype)
         
-        # Map sequence positions to vocabulary (simple averaging for same locations)
-        copy_logits = torch.zeros(B, 1200, device=loc.device, dtype=copy_attn.dtype)
-        copy_logits.scatter_add_(1, loc, copy_attn)
+        # Scatter-add: accumulate probabilities for repeated locations
+        copy_dist.scatter_add_(1, loc, pointer_probs)
         
-        # TRANSITION: Last location -> target
-        last_locs = loc[torch.arange(B), lengths.clamp(min=0)]
-        trans_emb = self.transition_embed(last_locs)
-        trans_feat = self.transition_fc(trans_emb)
+        # Add small boost for locations that appear multiple times (pattern reinforcement)
+        for b in range(B):
+            loc_counts = torch.bincount(loc[b, mask[b]], minlength=1200)
+            boost = (loc_counts > 0).float() * 0.1
+            copy_dist[b] = copy_dist[b] + boost[:1200]
         
-        # GENERATION: Standard classification
-        gen_logits = self.generate_head(combined + trans_feat)
+        copy_logits = torch.log(copy_dist + 1e-10)
         
-        # COMBINE: Gate between copy and generate
-        gate = self.combine_gate(torch.cat([combined, trans_feat], dim=-1))  # [B, 1]
+        # GENERATION: For new locations
+        gen_logits = self.gen_head(final_repr)
         
-        # Final logits
-        final_logits = gate * copy_logits + (1 - gate) * gen_logits
+        # Balance (learned per sample based on sequence and user)
+        balance = self.copy_gen_balance(torch.cat([final_repr, user_pref], dim=-1))
+        
+        # Combined (bias towards copying since 69% targets are in sequence)
+        copy_weight = 0.8 + balance * 0.2  # 0.8-1.0 range, biased to copy
+        final_logits = copy_weight * copy_logits + (1 - copy_weight) * gen_logits
         
         return final_logits
 

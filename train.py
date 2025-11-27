@@ -107,10 +107,10 @@ def train_model(
     num_heads=4,
     num_layers=2,
     num_cycles=2,
-    num_refinements=12,
+    num_refinements=8,
     dropout=0.1,
     max_len=50,
-    patience=30,
+    patience=35,
     device='cuda'
 ):
     set_seed(42)
