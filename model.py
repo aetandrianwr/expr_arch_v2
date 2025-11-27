@@ -15,43 +15,51 @@ class RecurrentTransformer(nn.Module):
                  num_weekdays=7,
                  num_start_min_bins=1440,
                  num_diff_bins=100,
-                 embed_dim=128,
+                 embed_dim=72,
                  num_heads=4,
                  num_layers=2,
                  num_cycles=3,
                  num_refinements=16,
-                 dropout=0.1):
+                 dropout=0.15):
         super().__init__()
         
         self.embed_dim = embed_dim
         self.num_cycles = num_cycles
         self.num_refinements = num_refinements
         
-        # Embeddings
+        # Embeddings with better capacity
         self.loc_embed = nn.Embedding(num_locations, embed_dim, padding_idx=0)
-        self.user_embed = nn.Embedding(num_users, embed_dim // 4, padding_idx=0)
-        self.weekday_embed = nn.Embedding(num_weekdays, embed_dim // 8, padding_idx=0)
-        self.start_min_embed = nn.Embedding(num_start_min_bins, embed_dim // 4, padding_idx=0)
-        self.diff_embed = nn.Embedding(num_diff_bins, embed_dim // 8, padding_idx=0)
+        self.user_embed = nn.Embedding(num_users, 20, padding_idx=0)
+        self.weekday_embed = nn.Embedding(num_weekdays, 8, padding_idx=0)
+        # Use bucketing for start_min to reduce parameters
+        self.num_time_buckets = 96  # 15-min buckets in a day
+        self.start_min_embed = nn.Embedding(self.num_time_buckets, 20, padding_idx=0)
+        self.diff_embed = nn.Embedding(num_diff_bins, 8, padding_idx=0)
         
         # Duration processing
-        self.duration_proj = nn.Linear(1, embed_dim // 4)
+        self.duration_proj = nn.Linear(1, 20)
         
         # Project all features to embed_dim
-        feature_dim = embed_dim + (embed_dim // 4) * 3 + (embed_dim // 8) * 2
-        self.input_proj = nn.Linear(feature_dim, embed_dim)
+        feature_dim = embed_dim + 20 * 3 + 8 * 2
+        self.input_proj = nn.Sequential(
+            nn.Linear(feature_dim, embed_dim),
+            nn.LayerNorm(embed_dim),
+            nn.GELU()
+        )
         
         # Positional encoding
         self.pos_encoding = PositionalEncoding(embed_dim, dropout, max_len=100)
         
-        # Hidden state initialization
-        self.hidden_init = nn.Parameter(torch.randn(1, 1, embed_dim))
+        # Hidden state initialization - learnable per cycle
+        self.hidden_init = nn.ParameterList([
+            nn.Parameter(torch.randn(1, 1, embed_dim)) for _ in range(num_cycles)
+        ])
         
         # Transformer encoder
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=embed_dim,
             nhead=num_heads,
-            dim_feedforward=embed_dim * 2,
+            dim_feedforward=embed_dim * 4,
             dropout=dropout,
             activation='gelu',
             batch_first=True,
@@ -59,23 +67,30 @@ class RecurrentTransformer(nn.Module):
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         
-        # Hidden state update
+        # Hidden state update with gate
+        self.hidden_gate = nn.Sequential(
+            nn.Linear(embed_dim * 2, embed_dim),
+            nn.Sigmoid()
+        )
         self.hidden_proj = nn.Linear(embed_dim, embed_dim)
         
-        # Refinement layers (outer loop)
+        # Sequence aggregation
+        self.seq_attention = nn.MultiheadAttention(embed_dim, num_heads, dropout=dropout, batch_first=True)
+        
+        # Refinement layers (outer loop) - improved
         self.refinement_layers = nn.ModuleList([
             nn.Sequential(
-                nn.Linear(embed_dim, embed_dim),
-                nn.LayerNorm(embed_dim),
+                nn.Linear(embed_dim, embed_dim * 2),
+                nn.LayerNorm(embed_dim * 2),
                 nn.GELU(),
-                nn.Dropout(dropout)
-            ) for _ in range(3)
+                nn.Dropout(dropout),
+                nn.Linear(embed_dim * 2, embed_dim)
+            ) for _ in range(2)
         ])
         
         # Output projection
         self.output_proj = nn.Sequential(
             nn.Linear(embed_dim, embed_dim * 2),
-            nn.LayerNorm(embed_dim * 2),
             nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(embed_dim * 2, num_locations)
@@ -99,7 +114,9 @@ class RecurrentTransformer(nn.Module):
         loc_emb = self.loc_embed(loc)
         user_emb = self.user_embed(user)
         weekday_emb = self.weekday_embed(weekday)
-        start_min_emb = self.start_min_embed(start_min)
+        # Bucket start_min into 15-minute intervals
+        start_min_bucketed = (start_min // 15).clamp(0, self.num_time_buckets - 1)
+        start_min_emb = self.start_min_embed(start_min_bucketed)
         dur_emb = self.duration_proj(duration.unsqueeze(-1))
         diff_emb = self.diff_embed(diff)
         
@@ -112,8 +129,8 @@ class RecurrentTransformer(nn.Module):
         # Add positional encoding
         x = self.pos_encoding(x)
         
-        # Initialize hidden state
-        hidden = self.hidden_init.expand(batch_size, 1, -1)
+        # Initialize hidden state for first cycle
+        hidden = self.hidden_init[0].expand(batch_size, 1, -1)
         
         # Recurrent Transformer cycles
         for cycle in range(self.num_cycles):
@@ -131,11 +148,23 @@ class RecurrentTransformer(nn.Module):
             transformed = self.transformer(combined, src_key_padding_mask=attn_mask)
             
             # Extract updated hidden state
-            hidden = transformed[:, 0:1, :]
+            new_hidden = transformed[:, 0:1, :]
+            
+            # Gated update
+            gate = self.hidden_gate(torch.cat([hidden, new_hidden], dim=-1))
+            hidden = gate * new_hidden + (1 - gate) * hidden
             hidden = self.hidden_proj(hidden)
+            
+            # Add cycle-specific initialization if available
+            if cycle + 1 < self.num_cycles:
+                hidden = hidden + self.hidden_init[cycle + 1].expand(batch_size, 1, -1)
         
-        # Extract final representation
-        output = hidden.squeeze(1)
+        # Aggregate sequence information via attention
+        seq_repr = transformed[:, 1:,:]  # All tokens except hidden
+        attn_output, _ = self.seq_attention(hidden, seq_repr, seq_repr, key_padding_mask=~mask)
+        
+        # Combine hidden and attention output
+        output = (hidden + attn_output).squeeze(1)
         
         # Outer refinement loop (detached manner)
         for refine_step in range(self.num_refinements):

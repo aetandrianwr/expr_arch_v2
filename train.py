@@ -4,6 +4,7 @@ import torch.optim as optim
 import numpy as np
 import random
 import os
+import math
 from tqdm import tqdm
 import json
 from datetime import datetime
@@ -99,17 +100,17 @@ def evaluate(model, data_loader, device):
 
 
 def train_model(
-    num_epochs=100,
+    num_epochs=150,
     batch_size=128,
     learning_rate=0.001,
-    embed_dim=128,
+    embed_dim=72,
     num_heads=4,
     num_layers=2,
     num_cycles=3,
     num_refinements=16,
-    dropout=0.1,
+    dropout=0.15,
     max_len=50,
-    patience=15,
+    patience=20,
     device='cuda'
 ):
     set_seed(42)
@@ -141,12 +142,19 @@ def train_model(
         print(f"WARNING: Model has {num_params:,} parameters, exceeding 500K limit!")
     
     # Optimizer and scheduler
-    optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=0.01)
+    optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=0.01, betas=(0.9, 0.999))
     
-    # Cosine annealing with warm restarts
-    scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
-        optimizer, T_0=10, T_mult=2, eta_min=1e-6
-    )
+    # Warmup + Cosine annealing
+    total_steps = len(train_loader) * num_epochs
+    warmup_steps = len(train_loader) * 5
+    
+    def lr_lambda(current_step):
+        if current_step < warmup_steps:
+            return float(current_step) / float(max(1, warmup_steps))
+        progress = float(current_step - warmup_steps) / float(max(1, total_steps - warmup_steps))
+        return max(0.0, 0.5 * (1.0 + math.cos(math.pi * progress)))
+    
+    scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
     
     criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
     
@@ -216,16 +224,16 @@ if __name__ == "__main__":
     print(f"Using device: {device}")
     
     test_perf = train_model(
-        num_epochs=100,
+        num_epochs=150,
         batch_size=128,
         learning_rate=0.001,
-        embed_dim=128,
+        embed_dim=72,
         num_heads=4,
         num_layers=2,
         num_cycles=3,
         num_refinements=16,
-        dropout=0.1,
+        dropout=0.15,
         max_len=50,
-        patience=15,
+        patience=20,
         device=device
     )
